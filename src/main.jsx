@@ -1157,3 +1157,15 @@ function App() {
 }
 
 createRoot(document.getElementById('root')).render(<App />);
+
+window.requestAnimationFrame(() => {
+  document.documentElement.classList.add('app-ready');
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((error) => {
+      console.warn('Service worker registration failed', error);
+    });
+  });
+}
