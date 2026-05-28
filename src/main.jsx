@@ -1,5 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { LineChart } from 'echarts/charts';
+import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
+import * as echarts from 'echarts/core';
+import { CanvasRenderer } from 'echarts/renderers';
 import {
   Activity,
   AlertCircle,
@@ -15,11 +19,15 @@ import {
   Timer,
   Trash2,
   Wand2,
+  Waves,
 } from 'lucide-react';
 import './styles.css';
 
+echarts.use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent]);
+
 const SETTLING_BAND = 0.02;
 const HISTORY_LIMIT = 8;
+const DEFAULT_TRANSFER_FUNCTION = '10 / (s^2 + 3s + 10)';
 
 function parseNumber(value) {
   if (value.trim() === '') {
@@ -167,10 +175,11 @@ function calculateRootLocus(dampingRatio, naturalFrequency) {
   const points = Array.from({ length: sampleCount + 1 }, (_, index) => {
     const gain = (maxGain * index) / sampleCount;
     const omega = Math.sqrt(gain);
+    const imaginary = dampingRatio < 1 ? omega * Math.sqrt(1 - dampingRatio ** 2) : 0;
     return {
       gain,
-      upper: { real: -dampingRatio * omega, imaginary: omega * Math.sqrt(1 - dampingRatio ** 2) },
-      lower: { real: -dampingRatio * omega, imaginary: -omega * Math.sqrt(1 - dampingRatio ** 2) },
+      upper: { real: -dampingRatio * omega, imaginary },
+      lower: { real: -dampingRatio * omega, imaginary: -imaginary },
     };
   });
 
@@ -179,6 +188,279 @@ function calculateRootLocus(dampingRatio, naturalFrequency) {
     openLoopPole: -2 * dampingRatio * naturalFrequency,
     openLoopZero: 0,
     currentPoles: getClosedLoopPoles(dampingRatio, naturalFrequency),
+    points,
+  };
+}
+
+function normalizePolynomialInput(text) {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[−–—]/g, '-')
+    .replace(/\*/g, '')
+    .replace(/\^/g, '^');
+}
+
+function trimOuterParentheses(value) {
+  let text = value;
+  let changed = true;
+
+  while (changed && text.startsWith('(') && text.endsWith(')')) {
+    changed = false;
+    let depth = 0;
+    let wraps = true;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (char === '(') {
+        depth += 1;
+      } else if (char === ')') {
+        depth -= 1;
+      }
+
+      if (depth === 0 && index < text.length - 1) {
+        wraps = false;
+        break;
+      }
+    }
+
+    if (wraps) {
+      text = text.slice(1, -1);
+      changed = true;
+    }
+  }
+
+  return text;
+}
+
+function splitTransferFunction(text) {
+  const normalized = normalizePolynomialInput(text);
+  let depth = 0;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (char === '(' || char === '[') {
+      depth += 1;
+    } else if (char === ')' || char === ']') {
+      depth -= 1;
+    } else if (char === '/' && depth === 0) {
+      return [normalized.slice(0, index), normalized.slice(index + 1)];
+    }
+  }
+
+  return null;
+}
+
+function parseCoefficientList(text) {
+  const listMatch = text.match(/^\[([^\]]+)\]$/);
+  if (!listMatch) {
+    return null;
+  }
+
+  const values = listMatch[1].split(',').map((item) => Number(item.trim()));
+  return values.every((value) => Number.isFinite(value)) ? trimLeadingZeros(values) : null;
+}
+
+function trimLeadingZeros(coefficients) {
+  const firstNonZero = coefficients.findIndex((value) => Math.abs(value) > 1e-12);
+  if (firstNonZero === -1) {
+    return [0];
+  }
+
+  return coefficients.slice(firstNonZero);
+}
+
+function parsePolynomial(text) {
+  const list = parseCoefficientList(text);
+  if (list) {
+    return list;
+  }
+
+  const cleanText = trimOuterParentheses(text);
+  if (!cleanText) {
+    return null;
+  }
+
+  const terms = cleanText.replace(/-/g, '+-').split('+').filter(Boolean);
+  const powerMap = new Map();
+  let maxPower = 0;
+
+  for (const term of terms) {
+    const sIndex = term.indexOf('s');
+    let coefficient = 0;
+    let power = 0;
+
+    if (sIndex === -1) {
+      coefficient = Number(term);
+      power = 0;
+    } else {
+      const coefficientText = term.slice(0, sIndex);
+      if (coefficientText === '' || coefficientText === '+') {
+        coefficient = 1;
+      } else if (coefficientText === '-') {
+        coefficient = -1;
+      } else {
+        coefficient = Number(coefficientText);
+      }
+
+      const powerMatch = term.slice(sIndex).match(/^s(?:\^(-?\d+))?$/);
+      if (!powerMatch) {
+        return null;
+      }
+      power = powerMatch[1] ? Number(powerMatch[1]) : 1;
+    }
+
+    if (!Number.isFinite(coefficient) || !Number.isInteger(power) || power < 0) {
+      return null;
+    }
+
+    maxPower = Math.max(maxPower, power);
+    powerMap.set(power, (powerMap.get(power) || 0) + coefficient);
+  }
+
+  return trimLeadingZeros(
+    Array.from({ length: maxPower + 1 }, (_, index) => powerMap.get(maxPower - index) || 0),
+  );
+}
+
+function parseTransferFunction(input) {
+  const parts = splitTransferFunction(input);
+  if (!parts) {
+    return { error: '请使用 num / den 格式，例如 10 / (s^2 + 3s + 10)' };
+  }
+
+  const numerator = parsePolynomial(parts[0]);
+  const denominator = parsePolynomial(parts[1]);
+
+  if (!numerator || !denominator) {
+    return { error: '暂不支持该传递函数格式，请输入 s 多项式或系数数组' };
+  }
+
+  if (denominator.every((value) => Math.abs(value) < 1e-12)) {
+    return { error: '分母不能为 0' };
+  }
+
+  return { numerator, denominator, error: '' };
+}
+
+function evaluatePolynomial(coefficients, omega) {
+  let real = 0;
+  let imaginary = 0;
+  const order = coefficients.length - 1;
+
+  coefficients.forEach((coefficient, index) => {
+    const power = order - index;
+    const magnitude = coefficient * omega ** power;
+    const phase = (power * Math.PI) / 2;
+    real += magnitude * Math.cos(phase);
+    imaginary += magnitude * Math.sin(phase);
+  });
+
+  return { real, imaginary };
+}
+
+function divideComplex(a, b) {
+  const denominator = b.real ** 2 + b.imaginary ** 2;
+  return {
+    real: (a.real * b.real + a.imaginary * b.imaginary) / denominator,
+    imaginary: (a.imaginary * b.real - a.real * b.imaginary) / denominator,
+  };
+}
+
+function unwrapDegrees(phases) {
+  const unwrapped = [];
+  let offset = 0;
+
+  phases.forEach((phase, index) => {
+    if (index > 0) {
+      const delta = phase + offset - unwrapped[index - 1];
+      if (delta > 180) {
+        offset -= 360;
+      } else if (delta < -180) {
+        offset += 360;
+      }
+    }
+    unwrapped.push(phase + offset);
+  });
+
+  return unwrapped;
+}
+
+function interpolateLogFrequency(left, right, targetKey, targetValue) {
+  const leftValue = left[targetKey];
+  const rightValue = right[targetKey];
+  const ratio = (targetValue - leftValue) / (rightValue - leftValue);
+  const logW = Math.log10(left.w) + ratio * (Math.log10(right.w) - Math.log10(left.w));
+  return 10 ** logW;
+}
+
+function interpolateValue(left, right, frequency, key) {
+  const ratio = (Math.log10(frequency) - Math.log10(left.w)) / (Math.log10(right.w) - Math.log10(left.w));
+  return left[key] + ratio * (right[key] - left[key]);
+}
+
+function calculateBode(input) {
+  const parsed = parseTransferFunction(input);
+  if (parsed.error) {
+    return { error: parsed.error };
+  }
+
+  const frequencyCount = 420;
+  const minExponent = -2;
+  const maxExponent = 3;
+  const rawPoints = Array.from({ length: frequencyCount }, (_, index) => {
+    const exponent = minExponent + ((maxExponent - minExponent) * index) / (frequencyCount - 1);
+    const w = 10 ** exponent;
+    const numerator = evaluatePolynomial(parsed.numerator, w);
+    const denominator = evaluatePolynomial(parsed.denominator, w);
+    const response = divideComplex(numerator, denominator);
+    const magnitude = Math.sqrt(response.real ** 2 + response.imaginary ** 2);
+    const magnitudeDb = 20 * Math.log10(Math.max(magnitude, 1e-16));
+    const phase = (Math.atan2(response.imaginary, response.real) * 180) / Math.PI;
+    return { w, magnitude, magnitudeDb, phase };
+  });
+
+  const phases = unwrapDegrees(rawPoints.map((point) => point.phase));
+  const points = rawPoints.map((point, index) => ({ ...point, phase: phases[index] }));
+  let cutoffFrequency = null;
+  let phaseMargin = null;
+  let gainMargin = null;
+  let phaseCrossFrequency = null;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const left = points[index - 1];
+    const right = points[index];
+    const crossesUnity =
+      (left.magnitudeDb >= 0 && right.magnitudeDb <= 0) || (left.magnitudeDb <= 0 && right.magnitudeDb >= 0);
+
+    if (crossesUnity && left.magnitudeDb !== right.magnitudeDb) {
+      cutoffFrequency = interpolateLogFrequency(left, right, 'magnitudeDb', 0);
+      const phaseAtCutoff = interpolateValue(left, right, cutoffFrequency, 'phase');
+      phaseMargin = 180 + phaseAtCutoff;
+      break;
+    }
+  }
+
+  for (let index = 1; index < points.length; index += 1) {
+    const left = points[index - 1];
+    const right = points[index];
+    const crossesMinus180 = (left.phase >= -180 && right.phase <= -180) || (left.phase <= -180 && right.phase >= -180);
+
+    if (crossesMinus180 && left.phase !== right.phase) {
+      phaseCrossFrequency = interpolateLogFrequency(left, right, 'phase', -180);
+      const magnitudeAtPhaseCross = interpolateValue(left, right, phaseCrossFrequency, 'magnitudeDb');
+      gainMargin = -magnitudeAtPhaseCross;
+      break;
+    }
+  }
+
+  return {
+    cutoffFrequency,
+    denominator: parsed.denominator,
+    error: '',
+    gainMargin,
+    numerator: parsed.numerator,
+    phaseCrossFrequency,
+    phaseMargin,
     points,
   };
 }
@@ -232,6 +514,43 @@ function buildRootLocusPath(points, branch, xScale, yScale) {
     const y = yScale(point[branch].imaginary);
     return index === 0 ? `M ${x} ${y}` : `${path} L ${x} ${y}`;
   }, '');
+}
+
+function getChartTextColor() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#64748b';
+}
+
+function getChartGridColor() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--line').trim() || 'rgba(148, 163, 184, 0.28)';
+}
+
+function EChart({ option }) {
+  const chartRef = useRef(null);
+  const instanceRef = useRef(null);
+
+  useEffect(() => {
+    if (!chartRef.current) {
+      return undefined;
+    }
+
+    instanceRef.current = echarts.init(chartRef.current, null, { renderer: 'canvas' });
+    const observer = new ResizeObserver(() => instanceRef.current?.resize());
+    observer.observe(chartRef.current);
+
+    return () => {
+      observer.disconnect();
+      instanceRef.current?.dispose();
+      instanceRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (instanceRef.current) {
+      instanceRef.current.setOption(option, true);
+    }
+  }, [option]);
+
+  return <div className="bode-chart" ref={chartRef} />;
 }
 
 function InputField({ label, value, onChange, unit, error, placeholder, icon: Icon }) {
@@ -340,13 +659,7 @@ function StepResponseChart({ response }) {
 
         {[0, 0.5, 1, yMax].map((value) => (
           <g key={value}>
-            <line
-              className="grid-line"
-              x1={padding.left}
-              x2={width - padding.right}
-              y1={yScale(value)}
-              y2={yScale(value)}
-            />
+            <line className="grid-line" x1={padding.left} x2={width - padding.right} y1={yScale(value)} y2={yScale(value)} />
             <text className="axis-label" x={padding.left - 12} y={yScale(value) + 4} textAnchor="end">
               {formatCompact(value, 2)}
             </text>
@@ -355,37 +668,16 @@ function StepResponseChart({ response }) {
 
         {ticks.map((tick) => (
           <g key={tick}>
-            <line
-              className="grid-line vertical"
-              x1={xScale(tick)}
-              x2={xScale(tick)}
-              y1={padding.top}
-              y2={height - padding.bottom}
-            />
+            <line className="grid-line vertical" x1={xScale(tick)} x2={xScale(tick)} y1={padding.top} y2={height - padding.bottom} />
             <text className="axis-label" x={xScale(tick)} y={height - 18} textAnchor="middle">
               {formatCompact(tick, 1)}s
             </text>
           </g>
         ))}
 
-        <path
-          className="response-area"
-          d={`${path} L ${width - padding.right} ${yScale(0)} L ${padding.left} ${yScale(0)} Z`}
-        />
-        <line
-          className="steady-line"
-          x1={padding.left}
-          x2={width - padding.right}
-          y1={steadyY}
-          y2={steadyY}
-        />
-        <line
-          className="settling-line"
-          x1={settlingX}
-          x2={settlingX}
-          y1={padding.top}
-          y2={height - padding.bottom}
-        />
+        <path className="response-area" d={`${path} L ${width - padding.right} ${yScale(0)} L ${padding.left} ${yScale(0)} Z`} />
+        <line className="steady-line" x1={padding.left} x2={width - padding.right} y1={steadyY} y2={steadyY} />
+        <line className="settling-line" x1={settlingX} x2={settlingX} y1={padding.top} y2={height - padding.bottom} />
         <path className="response-line" d={path} />
 
         <circle className="peak-dot" cx={peakX} cy={peakY} r="6" />
@@ -453,31 +745,13 @@ function RootLocusChart({ locus }) {
           <h2>根轨迹图</h2>
         </div>
         <div className="chart-tools" aria-label="根轨迹缩放控制">
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => updateZoom(zoom * 1.18)}
-            title="放大"
-            aria-label="放大根轨迹"
-          >
+          <button type="button" className="icon-button" onClick={() => updateZoom(zoom * 1.18)} title="放大" aria-label="放大根轨迹">
             <Plus size={17} aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => updateZoom(zoom / 1.18)}
-            title="缩小"
-            aria-label="缩小根轨迹"
-          >
+          <button type="button" className="icon-button" onClick={() => updateZoom(zoom / 1.18)} title="缩小" aria-label="缩小根轨迹">
             <Minus size={17} aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => setZoom(1)}
-            title="重置视图"
-            aria-label="重置根轨迹视图"
-          >
+          <button type="button" className="icon-button" onClick={() => setZoom(1)} title="重置视图" aria-label="重置根轨迹视图">
             <LocateFixed size={17} aria-hidden="true" />
           </button>
           <span>{Math.round(zoom * 100)}%</span>
@@ -502,13 +776,7 @@ function RootLocusChart({ locus }) {
 
         {imaginaryTicks.map((tick) => (
           <g key={`imaginary-${tick}`}>
-            <line
-              className="grid-line"
-              x1={padding.left}
-              x2={width - padding.right}
-              y1={yScale(tick)}
-              y2={yScale(tick)}
-            />
+            <line className="grid-line" x1={padding.left} x2={width - padding.right} y1={yScale(tick)} y2={yScale(tick)} />
             <text className="axis-label" x={padding.left - 12} y={yScale(tick) + 4} textAnchor="end">
               {formatCompact(tick, 1)}
             </text>
@@ -517,13 +785,7 @@ function RootLocusChart({ locus }) {
 
         {realTicks.map((tick) => (
           <g key={`real-${tick}`}>
-            <line
-              className="grid-line vertical"
-              x1={xScale(tick)}
-              x2={xScale(tick)}
-              y1={padding.top}
-              y2={height - padding.bottom}
-            />
+            <line className="grid-line vertical" x1={xScale(tick)} x2={xScale(tick)} y1={padding.top} y2={height - padding.bottom} />
             <text className="axis-label" x={xScale(tick)} y={height - 18} textAnchor="middle">
               {formatCompact(tick, 1)}
             </text>
@@ -545,11 +807,7 @@ function RootLocusChart({ locus }) {
 
         <g className="current-poles" key={currentPoleKey}>
           {locus.currentPoles.map((pole, index) => (
-            <g
-              className="current-pole"
-              key={`${pole.real}-${pole.imaginary}-${index}`}
-              transform={`translate(${xScale(pole.real)} ${yScale(pole.imaginary)})`}
-            >
+            <g className="current-pole" key={`${pole.real}-${pole.imaginary}-${index}`} transform={`translate(${xScale(pole.real)} ${yScale(pole.imaginary)})`}>
               <circle r="8" />
               <circle r="3" />
             </g>
@@ -567,13 +825,130 @@ function RootLocusChart({ locus }) {
       <div className="root-locus-legend">
         <span>
           <i className="legend-line" />
-          K: 0 → {formatCompact(locus.gainAtDesign * 2.25, 2)}
+          K: 0 {'->'} {formatCompact(locus.gainAtDesign * 2.25, 2)}
         </span>
         <span>
           <i className="legend-dot" />
           当前闭环极点
         </span>
       </div>
+    </section>
+  );
+}
+
+function BodePanel({ input, onChange, bode, onExample }) {
+  const option = useMemo(() => {
+    if (!bode || bode.error) {
+      return null;
+    }
+
+    const textColor = getChartTextColor();
+    const gridColor = getChartGridColor();
+    const frequencies = bode.points.map((point) => point.w);
+    const magnitude = bode.points.map((point) => [point.w, point.magnitudeDb]);
+    const phase = bode.points.map((point) => [point.w, point.phase]);
+
+    return {
+      animationDuration: 550,
+      backgroundColor: 'transparent',
+      color: ['#1677ff', '#16c8b7'],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: [0, 1], filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true },
+        { type: 'slider', xAxisIndex: [0, 1], bottom: 8, height: 22, borderColor: gridColor, fillerColor: 'rgba(22,119,255,0.18)', dataBackground: { lineStyle: { color: '#1677ff' }, areaStyle: { color: 'rgba(22,119,255,0.08)' } } },
+      ],
+      grid: [
+        { top: 28, left: 64, right: 28, height: '35%' },
+        { top: '56%', left: 64, right: 28, height: '28%' },
+      ],
+      legend: { top: 0, right: 16, textStyle: { color: textColor } },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross', link: [{ xAxisIndex: 'all' }] },
+        valueFormatter: (value) => formatCompact(value, 3),
+      },
+      xAxis: [
+        {
+          type: 'log',
+          min: frequencies[0],
+          max: frequencies[frequencies.length - 1],
+          gridIndex: 0,
+          axisLabel: { color: textColor, formatter: (value) => formatCompact(value, 2) },
+          axisLine: { lineStyle: { color: gridColor } },
+          splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
+        },
+        {
+          type: 'log',
+          min: frequencies[0],
+          max: frequencies[frequencies.length - 1],
+          gridIndex: 1,
+          name: 'rad/s',
+          nameTextStyle: { color: textColor, padding: [8, 0, 0, 0] },
+          axisLabel: { color: textColor, formatter: (value) => formatCompact(value, 2) },
+          axisLine: { lineStyle: { color: gridColor } },
+          splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
+        },
+      ],
+      yAxis: [
+        {
+          type: 'value',
+          gridIndex: 0,
+          name: 'Magnitude (dB)',
+          nameTextStyle: { color: textColor },
+          axisLabel: { color: textColor },
+          splitLine: { lineStyle: { color: gridColor } },
+        },
+        {
+          type: 'value',
+          gridIndex: 1,
+          name: 'Phase (deg)',
+          nameTextStyle: { color: textColor },
+          axisLabel: { color: textColor },
+          splitLine: { lineStyle: { color: gridColor } },
+        },
+      ],
+      series: [
+        { name: '幅频特性', type: 'line', xAxisIndex: 0, yAxisIndex: 0, smooth: true, showSymbol: false, lineStyle: { width: 3 }, data: magnitude },
+        { name: '相频特性', type: 'line', xAxisIndex: 1, yAxisIndex: 1, smooth: true, showSymbol: false, lineStyle: { width: 3 }, data: phase },
+      ],
+    };
+  }, [bode]);
+
+  return (
+    <section className="chart-panel bode-panel" aria-label="波特图分析">
+      <div className="chart-header">
+        <div>
+          <span>Bode Plot</span>
+          <h2>波特图与稳定裕度</h2>
+        </div>
+        <button className="secondary-button compact-button" type="button" onClick={onExample}>
+          <Wand2 size={17} aria-hidden="true" />
+          示例
+        </button>
+      </div>
+
+      <label className="field transfer-field">
+        <span className="field-label">
+          <Waves size={18} aria-hidden="true" />
+          开环传递函数 G(s)
+        </span>
+        <textarea value={input} onChange={(event) => onChange(event.target.value)} spellCheck="false" placeholder="例如 10 / (s^2 + 3s + 10)，或 [1, 3] / [1, 2, 1]" />
+      </label>
+
+      {bode?.error ? (
+        <div className="notice">
+          <AlertCircle size={18} aria-hidden="true" />
+          {bode.error}
+        </div>
+      ) : (
+        <>
+          <div className="bode-metrics">
+            <ResultCard title="截止频率" value={formatCompact(bode.cutoffFrequency, 3)} unit=" rad/s" description="幅值穿越 0 dB 的频率，也常称增益交叉频率。" />
+            <ResultCard title="相位裕度" value={formatCompact(bode.phaseMargin, 2)} unit=" deg" description="在截止频率处距离 -180 deg 的相位余量。" />
+            <ResultCard title="增益裕度" value={formatCompact(bode.gainMargin, 2)} unit=" dB" description="在 -180 deg 相位交叉处距离 0 dB 的增益余量。" />
+          </div>
+          {option ? <EChart option={option} /> : null}
+        </>
+      )}
     </section>
   );
 }
@@ -609,6 +984,7 @@ function HistoryPanel({ history, onApply, onClear }) {
 function App() {
   const [mpInput, setMpInput] = useState('10');
   const [tsInput, setTsInput] = useState('2');
+  const [transferInput, setTransferInput] = useState(DEFAULT_TRANSFER_FUNCTION);
   const [history, setHistory] = useState([]);
 
   const mp = parseNumber(mpInput);
@@ -641,9 +1017,11 @@ function App() {
     return calculateRootLocus(result.dampingRatio, result.naturalFrequency);
   }, [result]);
 
+  const bode = useMemo(() => calculateBode(transferInput), [transferInput]);
+
   useEffect(() => {
     if (!result || mp === null || ts === null) {
-      return;
+      return undefined;
     }
 
     const timeoutId = window.setTimeout(() => {
@@ -681,6 +1059,7 @@ function App() {
   function clearAll() {
     setMpInput('');
     setTsInput('');
+    setTransferInput(DEFAULT_TRANSFER_FUNCTION);
     setHistory([]);
   }
 
@@ -696,7 +1075,7 @@ function App() {
           <Sparkles size={17} aria-hidden="true" />
           Control AI Lab
         </span>
-        <span className="nav-status">二阶系统 · 实时计算</span>
+        <span className="nav-status">二阶系统 · 根轨迹 · 波特图</span>
       </nav>
 
       <section className="hero">
@@ -705,9 +1084,9 @@ function App() {
             <Calculator size={16} aria-hidden="true" />
             自动控制参数智能计算
           </span>
-          <h1>实时计算控制系统参数</h1>
+          <h1>实时分析控制系统动态特性</h1>
           <p>
-            输入超调量 Mp 与调整时间 Ts，页面会自动推导阻尼比 ζ 和自然频率 ωn，并同步绘制单位阶跃响应曲线。
+            输入超调量 Mp、调整时间 Ts 或开环传递函数 G(s)，页面会自动计算系统参数、阶跃响应、根轨迹以及完整波特图稳定裕度。
           </p>
           <div className="actions">
             <button className="primary-button" type="button" onClick={loadExample}>
@@ -729,39 +1108,13 @@ function App() {
         </div>
 
         <div className="inputs">
-          <InputField
-            label="超调量 Mp"
-            value={mpInput}
-            onChange={setMpInput}
-            unit="%"
-            error={mpError}
-            placeholder="例如 10"
-            icon={Gauge}
-          />
-          <InputField
-            label="调整时间 Ts"
-            value={tsInput}
-            onChange={setTsInput}
-            unit="s"
-            error={tsError}
-            placeholder="例如 2"
-            icon={Timer}
-          />
+          <InputField label="超调量 Mp" value={mpInput} onChange={setMpInput} unit="%" error={mpError} placeholder="例如 10" icon={Gauge} />
+          <InputField label="调整时间 Ts" value={tsInput} onChange={setTsInput} unit="s" error={tsError} placeholder="例如 2" icon={Timer} />
         </div>
 
         <div className="results" aria-live="polite">
-          <ResultCard
-            title="阻尼比 ζ"
-            value={result ? formatNumber(result.dampingRatio) : '--'}
-            unit=""
-            description="ζ 越大，振荡越弱；ζ 位于 0 到 1 之间时为欠阻尼系统。"
-          />
-          <ResultCard
-            title="自然频率 ωn"
-            value={result ? formatNumber(result.naturalFrequency) : '--'}
-            unit=" rad/s"
-            description="ωn 表示系统固有响应速度，数值越大通常响应越快。"
-          />
+          <ResultCard title="阻尼比 ζ" value={result ? formatNumber(result.dampingRatio) : '--'} unit="" description="ζ 越大，振荡越弱；ζ 位于 0 到 1 之间时为欠阻尼系统。" />
+          <ResultCard title="自然频率 ωn" value={result ? formatNumber(result.naturalFrequency) : '--'} unit=" rad/s" description="ωn 表示系统固有响应速度，数值越大通常响应越快。" />
         </div>
 
         {!canCalculate ? (
@@ -771,6 +1124,8 @@ function App() {
           </div>
         ) : null}
       </section>
+
+      <BodePanel input={transferInput} onChange={setTransferInput} bode={bode} onExample={() => setTransferInput(DEFAULT_TRANSFER_FUNCTION)} />
 
       <StepResponseChart response={response} />
 
