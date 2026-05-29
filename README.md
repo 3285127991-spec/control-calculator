@@ -28,7 +28,7 @@ bash
 npm install
 npm run dev
 访问
-http://localhost:5173
+(https://control-calculator.netlify.app/)
 ## 构建
 bash
 npm run build
