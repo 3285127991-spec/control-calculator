@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LineChart } from 'echarts/charts';
-import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
+import { DataZoomComponent, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import {
@@ -24,18 +24,19 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-echarts.use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent]);
+echarts.use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent]);
 
 const SETTLING_BAND = 0.02;
 const HISTORY_LIMIT = 8;
 const DEFAULT_TRANSFER_FUNCTION = '10 / (s^2 + 3s + 10)';
-const PROJECT_FEATURES = ['根轨迹', '波特图', '单位阶跃响应', '参数实时计算', '历史记录'];
+const PROJECT_FEATURES = ['根轨迹', '波特图', 'Nyquist 图', '单位阶跃响应', '参数实时计算', '历史记录'];
 const CHANGELOG_ITEMS = [
   { version: 'v0.1', text: '完成基础参数计算' },
   { version: 'v0.2', text: '增加根轨迹图' },
   { version: 'v0.3', text: '增加阶跃响应' },
   { version: 'v0.4', text: '增加波特图' },
   { version: 'v0.5', text: '支持手机端和 PWA/APP 化探索' },
+  { version: 'v0.6', text: '增加真实计算的 Nyquist 图模块' },
 ];
 
 function parseNumber(value) {
@@ -744,6 +745,73 @@ function calculateBode(input) {
   };
 }
 
+function evaluateTransferAtOmega(parsed, omega) {
+  const numerator = evaluatePolynomial(parsed.numerator, omega);
+  const denominator = evaluatePolynomial(parsed.denominator, omega);
+  const denominatorMagnitude = Math.hypot(denominator.real, denominator.imaginary);
+
+  if (denominatorMagnitude < 1e-14) {
+    return null;
+  }
+
+  const response = divideComplex(numerator, denominator);
+  const magnitude = Math.hypot(response.real, response.imaginary);
+  const phase = (Math.atan2(response.imaginary, response.real) * 180) / Math.PI;
+
+  if (![response.real, response.imaginary, magnitude, phase].every(Number.isFinite)) {
+    return null;
+  }
+
+  return {
+    distanceToCritical: Math.hypot(response.real + 1, response.imaginary),
+    imaginary: response.imaginary,
+    magnitude,
+    phase,
+    real: response.real,
+    w: omega,
+  };
+}
+
+function calculateNyquist(input) {
+  const parsed = parseTransferFunction(input);
+  if (parsed.error) {
+    return { error: parsed.error };
+  }
+
+  const frequencyCount = 520;
+  const minExponent = -2;
+  const maxExponent = 3;
+  const frequencies = Array.from({ length: frequencyCount }, (_, index) => {
+    const exponent = minExponent + ((maxExponent - minExponent) * index) / (frequencyCount - 1);
+    return 10 ** exponent;
+  });
+
+  const positivePoints = frequencies.map((frequency) => evaluateTransferAtOmega(parsed, frequency)).filter(Boolean);
+  const negativePoints = frequencies.map((frequency) => evaluateTransferAtOmega(parsed, -frequency)).filter(Boolean);
+  const allPoints = [...positivePoints, ...negativePoints];
+  const closestPoint = allPoints.reduce(
+    (closest, point) => (!closest || point.distanceToCritical < closest.distanceToCritical ? point : closest),
+    null,
+  );
+  const openLoopPoles = solvePolynomialRoots(parsed.denominator);
+  const openLoopRightHalfPoles = openLoopPoles.filter((pole) => pole.real > 1e-7).length;
+  const closedLoopPoles = solvePolynomialRoots(addScaledPolynomials(parsed.denominator, parsed.numerator, 1));
+  const closedLoopRightHalfPoles = closedLoopPoles.filter((pole) => pole.real > 1e-7).length;
+
+  return {
+    closestPoint,
+    closedLoopPoles,
+    closedLoopRightHalfPoles,
+    error: '',
+    maxFrequency: frequencies[frequencies.length - 1],
+    minFrequency: frequencies[0],
+    negativePoints,
+    openLoopPoles,
+    openLoopRightHalfPoles,
+    positivePoints,
+  };
+}
+
 function formatNumber(value, digits = 4) {
   if (!Number.isFinite(value)) {
     return '--';
@@ -795,6 +863,21 @@ function buildRootLocusPath(points, xScale, yScale) {
   }, '');
 }
 
+function buildNyquistArrowMarks(points, count = 5) {
+  if (points.length < 3) {
+    return [];
+  }
+
+  const step = Math.max(2, Math.floor(points.length / (count + 1)));
+  return Array.from({ length: count }, (_, index) => {
+    const endIndex = Math.min(points.length - 1, (index + 1) * step);
+    const startIndex = Math.max(0, endIndex - Math.max(1, Math.floor(step * 0.24)));
+    const start = points[startIndex];
+    const end = points[endIndex];
+    return [{ coord: [start.real, start.imaginary] }, { coord: [end.real, end.imaginary] }];
+  });
+}
+
 function getChartTextColor() {
   return getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#64748b';
 }
@@ -803,7 +886,7 @@ function getChartGridColor() {
   return getComputedStyle(document.documentElement).getPropertyValue('--line').trim() || 'rgba(148, 163, 184, 0.28)';
 }
 
-function EChart({ option }) {
+function EChart({ option, className = 'bode-chart' }) {
   const chartRef = useRef(null);
   const instanceRef = useRef(null);
 
@@ -829,7 +912,7 @@ function EChart({ option }) {
     }
   }, [option]);
 
-  return <div className="bode-chart" ref={chartRef} />;
+  return <div className={className} ref={chartRef} />;
 }
 
 function InputField({ label, value, onChange, unit, error, placeholder, icon: Icon }) {
@@ -1255,6 +1338,214 @@ function BodePanel({ input, onChange, bode, onExample }) {
   );
 }
 
+function NyquistPanel({ nyquist, bode }) {
+  const option = useMemo(() => {
+    if (!nyquist || nyquist.error) {
+      return null;
+    }
+
+    const textColor = getChartTextColor();
+    const gridColor = getChartGridColor();
+    const positiveData = nyquist.positivePoints.map((point) => [
+      point.real,
+      point.imaginary,
+      point.w,
+      point.magnitude,
+      point.phase,
+      point.distanceToCritical,
+    ]);
+    const negativeData = nyquist.negativePoints.map((point) => [
+      point.real,
+      point.imaginary,
+      point.w,
+      point.magnitude,
+      point.phase,
+      point.distanceToCritical,
+    ]);
+
+    return {
+      animationDuration: 650,
+      backgroundColor: 'transparent',
+      color: ['#1677ff', '#16c8b7', '#d93d5b'],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true },
+        { type: 'inside', yAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true },
+        { type: 'slider', xAxisIndex: 0, bottom: 8, height: 22, borderColor: gridColor, fillerColor: 'rgba(22,119,255,0.18)' },
+      ],
+      grid: { top: 36, left: 72, right: 32, bottom: 66 },
+      legend: { top: 0, right: 16, textStyle: { color: textColor } },
+      tooltip: {
+        trigger: 'item',
+        borderWidth: 0,
+        backgroundColor: 'rgba(15, 23, 42, 0.9)',
+        textStyle: { color: '#f8fafc' },
+        formatter: (params) => {
+          const data = Array.isArray(params.data) ? params.data : params.data?.value;
+          if (!data) {
+            return '';
+          }
+
+          if (params.seriesName.includes('-1')) {
+            return [
+              '<strong>关键点 (-1, 0)</strong>',
+              '单位负反馈稳定性判据的核心参考点',
+            ].join('<br/>');
+          }
+
+          const [real, imaginary, w, magnitude, phase] = data;
+          return [
+            `<strong>${params.seriesName}</strong>`,
+            `ω: ${formatCompact(w, 4)} rad/s`,
+            `Re: ${formatCompact(real, 5)}`,
+            `Im: ${formatCompact(imaginary, 5)}`,
+            `|G(jω)|: ${formatCompact(magnitude, 5)}`,
+            `∠G(jω): ${formatCompact(phase, 3)} deg`,
+          ].join('<br/>');
+        },
+      },
+      xAxis: {
+        type: 'value',
+        name: 'Re',
+        nameTextStyle: { color: textColor, fontWeight: 800 },
+        axisLabel: { color: textColor, formatter: (value) => formatCompact(value, 2) },
+        axisLine: { onZero: true, lineStyle: { color: gridColor, width: 2 } },
+        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Im',
+        nameTextStyle: { color: textColor, fontWeight: 800 },
+        axisLabel: { color: textColor, formatter: (value) => formatCompact(value, 2) },
+        axisLine: { onZero: true, lineStyle: { color: gridColor, width: 2 } },
+        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
+      },
+      series: [
+        {
+          name: '正频率 G(jω)',
+          type: 'line',
+          data: positiveData,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: { width: 3.4 },
+          markLine: {
+            symbol: ['none', 'arrow'],
+            symbolSize: 12,
+            silent: true,
+            lineStyle: { color: '#1677ff', width: 2.1 },
+            data: buildNyquistArrowMarks(nyquist.positivePoints),
+          },
+        },
+        {
+          name: '负频率 G(-jω)',
+          type: 'line',
+          data: negativeData,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: { width: 2.8, type: 'dashed' },
+          markLine: {
+            symbol: ['none', 'arrow'],
+            symbolSize: 12,
+            silent: true,
+            lineStyle: { color: '#16c8b7', width: 2, type: 'dashed' },
+            data: buildNyquistArrowMarks(nyquist.negativePoints),
+          },
+        },
+        {
+          name: '关键点 (-1, 0)',
+          type: 'line',
+          data: [{ value: [-1, 0, 0, 1, 180, 0], symbol: 'pin', symbolSize: 32 }],
+          lineStyle: { opacity: 0 },
+          showSymbol: true,
+          symbol: 'pin',
+          symbolSize: 32,
+          itemStyle: { color: '#d93d5b' },
+        },
+      ],
+    };
+  }, [nyquist]);
+
+  if (nyquist?.error) {
+    return (
+      <section className="chart-panel nyquist-panel" aria-label="Nyquist 图分析">
+        <div className="chart-header">
+          <div>
+            <span>Nyquist Plot</span>
+            <h2>Nyquist 图</h2>
+          </div>
+        </div>
+        <div className="notice">
+          <AlertCircle size={18} aria-hidden="true" />
+          {nyquist.error}
+        </div>
+      </section>
+    );
+  }
+
+  const closest = nyquist?.closestPoint;
+  const distance = closest?.distanceToCritical;
+  const distanceSummary =
+    distance < 0.25
+      ? '曲线已经非常靠近 (-1,0)，稳定裕度偏紧，需要重点检查。'
+      : distance < 0.75
+        ? '曲线距离 (-1,0) 不远，系统对增益或相位变化会比较敏感。'
+        : '曲线目前离 (-1,0) 较远，按采样结果看裕度相对充足。';
+  const closedLoopSummary =
+    nyquist?.closedLoopRightHalfPoles === 0
+      ? '按 K=1 单位负反馈闭环极点判断，当前闭环极点都在左半平面。'
+      : `按 K=1 单位负反馈闭环极点判断，有 ${nyquist?.closedLoopRightHalfPoles} 个闭环极点在右半平面。`;
+  const phaseMarginText = Number.isFinite(bode?.phaseMargin)
+    ? `${formatCompact(bode.phaseMargin, 2)} deg`
+    : '未在 0.01-1000 rad/s 内检测到';
+  const gainMarginText = Number.isFinite(bode?.gainMargin)
+    ? `${formatCompact(bode.gainMargin, 2)} dB`
+    : '未在 0.01-1000 rad/s 内检测到';
+
+  return (
+    <section className="chart-panel nyquist-panel" aria-label="Nyquist 图分析">
+      <div className="chart-header">
+        <div>
+          <span>Nyquist Plot</span>
+          <h2>Nyquist 图与闭环稳定性</h2>
+        </div>
+        <div className="chart-metrics">
+          <strong>{formatCompact(distance, 3)}</strong>
+          <span>到 (-1,0) 最近距离</span>
+        </div>
+      </div>
+
+      <div className="nyquist-layout">
+        {option ? <EChart option={option} className="nyquist-chart" /> : null}
+        <div className="nyquist-insights">
+          <article>
+            <h3>怎么看 Nyquist 图</h3>
+            <p>横轴是 Re(G(jω))，纵轴是 Im(G(jω))。沿正频率曲线看 ω 从 0.01 增大到 1000 rad/s，虚线为负频率对应的对称曲线，箭头表示频率增大的方向。</p>
+          </article>
+          <article>
+            <h3>是否靠近 (-1,0)</h3>
+            <p>
+              最近点出现在 ω = {formatCompact(closest?.w, 4)} rad/s，Re = {formatCompact(closest?.real, 4)}，
+              Im = {formatCompact(closest?.imaginary, 4)}。{distanceSummary}
+            </p>
+          </article>
+          <article>
+            <h3>与闭环稳定性的关系</h3>
+            <p>
+              对单位负反馈系统，Nyquist 判据观察曲线对 (-1,0) 的环绕。开环右半平面极点数为 {nyquist?.openLoopRightHalfPoles}。
+              {closedLoopSummary}
+            </p>
+          </article>
+          <article>
+            <h3>与稳定裕度的关系</h3>
+            <p>
+              曲线越贴近 (-1,0)，通常相位裕度和增益裕度越小。当前波特图估计：相位裕度 {phaseMarginText}，增益裕度 {gainMarginText}。
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function HistoryPanel({ history, onApply, onClear }) {
   return (
     <section className="history-panel" aria-label="历史记录">
@@ -1357,6 +1648,8 @@ function App() {
 
   const bode = useMemo(() => calculateBode(transferInput), [transferInput]);
 
+  const nyquist = useMemo(() => calculateNyquist(transferInput), [transferInput]);
+
   useEffect(() => {
     if (!result || mp === null || ts === null) {
       return undefined;
@@ -1413,7 +1706,7 @@ function App() {
           <Sparkles size={17} aria-hidden="true" />
           Control AI Lab
         </span>
-        <span className="nav-status">二阶系统 · 根轨迹 · 波特图</span>
+        <span className="nav-status">二阶系统 · 根轨迹 · 波特图 · Nyquist</span>
         <a className="nav-link" href="#about">
           <BookOpen size={16} aria-hidden="true" />
           <span>关于项目 / 使用说明</span>
@@ -1428,7 +1721,7 @@ function App() {
           </span>
           <h1>实时分析控制系统动态特性</h1>
           <p>
-            输入超调量 Mp、调整时间 Ts 或开环传递函数 G(s)，页面会自动计算系统参数、阶跃响应、根轨迹以及完整波特图稳定裕度。
+            输入超调量 Mp、调整时间 Ts 或开环传递函数 G(s)，页面会自动计算系统参数、阶跃响应、根轨迹、波特图以及 Nyquist 稳定性视图。
           </p>
           <div className="actions">
             <button className="primary-button" type="button" onClick={loadExample}>
@@ -1468,6 +1761,8 @@ function App() {
       </section>
 
       <BodePanel input={transferInput} onChange={setTransferInput} bode={bode} onExample={() => setTransferInput(DEFAULT_TRANSFER_FUNCTION)} />
+
+      <NyquistPanel nyquist={nyquist} bode={bode} />
 
       <StepResponseChart response={response} />
 
