@@ -149,64 +149,11 @@ function calculateStepResponse(dampingRatio, naturalFrequency) {
   };
 }
 
-function getClosedLoopPoles(dampingRatio, naturalFrequency) {
-  if (dampingRatio < 1) {
-    const real = -dampingRatio * naturalFrequency;
-    const imaginary = naturalFrequency * Math.sqrt(1 - dampingRatio ** 2);
-    return [
-      { real, imaginary },
-      { real, imaginary: -imaginary },
-    ];
-  }
-
-  if (dampingRatio === 1) {
-    return [
-      { real: -naturalFrequency, imaginary: 0 },
-      { real: -naturalFrequency, imaginary: 0 },
-    ];
-  }
-
-  const root = Math.sqrt(dampingRatio ** 2 - 1);
-  return [
-    { real: -naturalFrequency * (dampingRatio - root), imaginary: 0 },
-    { real: -naturalFrequency * (dampingRatio + root), imaginary: 0 },
-  ];
-}
-
-function calculateRootLocus(dampingRatio, naturalFrequency) {
-  if (dampingRatio <= 0 || naturalFrequency <= 0) {
-    return null;
-  }
-
-  const gainAtDesign = naturalFrequency ** 2;
-  const sampleCount = 120;
-  const maxGain = gainAtDesign * 2.25;
-  const points = Array.from({ length: sampleCount + 1 }, (_, index) => {
-    const gain = (maxGain * index) / sampleCount;
-    const omega = Math.sqrt(gain);
-    const imaginary = dampingRatio < 1 ? omega * Math.sqrt(1 - dampingRatio ** 2) : 0;
-    return {
-      gain,
-      upper: { real: -dampingRatio * omega, imaginary },
-      lower: { real: -dampingRatio * omega, imaginary: -imaginary },
-    };
-  });
-
-  return {
-    gainAtDesign,
-    openLoopPole: -2 * dampingRatio * naturalFrequency,
-    openLoopZero: 0,
-    currentPoles: getClosedLoopPoles(dampingRatio, naturalFrequency),
-    points,
-  };
-}
-
 function normalizePolynomialInput(text) {
   return text
     .toLowerCase()
     .replace(/\s+/g, '')
     .replace(/[−–—]/g, '-')
-    .replace(/\*/g, '')
     .replace(/\^/g, '^');
 }
 
@@ -278,6 +225,160 @@ function trimLeadingZeros(coefficients) {
   return coefficients.slice(firstNonZero);
 }
 
+function multiplyPolynomials(left, right) {
+  const result = Array(left.length + right.length - 1).fill(0);
+  left.forEach((leftCoefficient, leftIndex) => {
+    right.forEach((rightCoefficient, rightIndex) => {
+      result[leftIndex + rightIndex] += leftCoefficient * rightCoefficient;
+    });
+  });
+
+  return trimLeadingZeros(result);
+}
+
+function addPolynomials(left, right) {
+  const length = Math.max(left.length, right.length);
+  const paddedLeft = padPolynomial(left, length);
+  const paddedRight = padPolynomial(right, length);
+  return trimLeadingZeros(paddedLeft.map((coefficient, index) => coefficient + paddedRight[index]));
+}
+
+function splitTopLevel(text, separator) {
+  const parts = [];
+  let depth = 0;
+  let startIndex = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '(' || char === '[') {
+      depth += 1;
+    } else if (char === ')' || char === ']') {
+      depth -= 1;
+    } else if (char === separator && depth === 0) {
+      parts.push(text.slice(startIndex, index));
+      startIndex = index + 1;
+    }
+  }
+
+  parts.push(text.slice(startIndex));
+  return parts;
+}
+
+function insertImplicitMultiplication(text) {
+  let result = '';
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    result += char;
+
+    if (!next) {
+      continue;
+    }
+
+    const currentEndsFactor = /[\d.s)\]]/.test(char);
+    const nextStartsGroupedFactor = /[(\[]/.test(next);
+    const currentEndsGroupedFactor = /[)\]]/.test(char);
+    const nextStartsBareFactor = next === 's';
+    if ((currentEndsFactor && nextStartsGroupedFactor) || (currentEndsGroupedFactor && nextStartsBareFactor)) {
+      result += '*';
+    }
+  }
+
+  return result;
+}
+
+function splitAdditiveTerms(text) {
+  const terms = [];
+  let depth = 0;
+  let startIndex = 0;
+  let sign = 1;
+
+  if (text[0] === '+' || text[0] === '-') {
+    sign = text[0] === '-' ? -1 : 1;
+    startIndex = 1;
+  }
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '(' || char === '[') {
+      depth += 1;
+    } else if (char === ')' || char === ']') {
+      depth -= 1;
+    } else if ((char === '+' || char === '-') && depth === 0 && text[index - 1] !== '^') {
+      const term = text.slice(startIndex, index);
+      if (!term) {
+        return null;
+      }
+      terms.push({ sign, term });
+      sign = char === '-' ? -1 : 1;
+      startIndex = index + 1;
+    }
+  }
+
+  const term = text.slice(startIndex);
+  if (!term) {
+    return null;
+  }
+  terms.push({ sign, term });
+  return terms;
+}
+
+function parseMonomial(text) {
+  const term = trimOuterParentheses(text);
+  const sIndex = term.indexOf('s');
+  let coefficient = 0;
+  let power = 0;
+
+  if (sIndex === -1) {
+    coefficient = Number(term);
+  } else {
+    if (term.indexOf('s', sIndex + 1) !== -1) {
+      return null;
+    }
+
+    const coefficientText = term.slice(0, sIndex);
+    if (coefficientText === '' || coefficientText === '+') {
+      coefficient = 1;
+    } else if (coefficientText === '-') {
+      coefficient = -1;
+    } else {
+      coefficient = Number(coefficientText);
+    }
+
+    const powerMatch = term.slice(sIndex).match(/^s(?:\^(-?\d+))?$/);
+    if (!powerMatch) {
+      return null;
+    }
+    power = powerMatch[1] ? Number(powerMatch[1]) : 1;
+  }
+
+  if (!Number.isFinite(coefficient) || !Number.isInteger(power) || power < 0) {
+    return null;
+  }
+
+  return trimLeadingZeros(
+    Array.from({ length: power + 1 }, (_, index) => (index === 0 ? coefficient : 0)),
+  );
+}
+
+function parsePolynomialProduct(text) {
+  const multipliedText = insertImplicitMultiplication(text);
+  const factors = splitTopLevel(multipliedText, '*');
+  if (factors.length > 1) {
+    return factors.reduce((product, factor) => {
+      if (!product || !factor) {
+        return null;
+      }
+
+      const parsedFactor = parsePolynomial(factor);
+      return parsedFactor ? multiplyPolynomials(product, parsedFactor) : null;
+    }, [1]);
+  }
+
+  return parseMonomial(multipliedText);
+}
+
 function parsePolynomial(text) {
   const list = parseCoefficientList(text);
   if (list) {
@@ -289,46 +390,24 @@ function parsePolynomial(text) {
     return null;
   }
 
-  const terms = cleanText.replace(/-/g, '+-').split('+').filter(Boolean);
-  const powerMap = new Map();
-  let maxPower = 0;
+  const terms = splitAdditiveTerms(cleanText);
+  if (!terms) {
+    return null;
+  }
 
-  for (const term of terms) {
-    const sIndex = term.indexOf('s');
-    let coefficient = 0;
-    let power = 0;
-
-    if (sIndex === -1) {
-      coefficient = Number(term);
-      power = 0;
-    } else {
-      const coefficientText = term.slice(0, sIndex);
-      if (coefficientText === '' || coefficientText === '+') {
-        coefficient = 1;
-      } else if (coefficientText === '-') {
-        coefficient = -1;
-      } else {
-        coefficient = Number(coefficientText);
-      }
-
-      const powerMatch = term.slice(sIndex).match(/^s(?:\^(-?\d+))?$/);
-      if (!powerMatch) {
-        return null;
-      }
-      power = powerMatch[1] ? Number(powerMatch[1]) : 1;
-    }
-
-    if (!Number.isFinite(coefficient) || !Number.isInteger(power) || power < 0) {
+  return terms.reduce((total, { sign, term }) => {
+    if (!total) {
       return null;
     }
 
-    maxPower = Math.max(maxPower, power);
-    powerMap.set(power, (powerMap.get(power) || 0) + coefficient);
-  }
+    const parsedTerm = parsePolynomialProduct(term);
+    if (!parsedTerm) {
+        return null;
+    }
 
-  return trimLeadingZeros(
-    Array.from({ length: maxPower + 1 }, (_, index) => powerMap.get(maxPower - index) || 0),
-  );
+    const signedTerm = parsedTerm.map((coefficient) => coefficient * sign);
+    return addPolynomials(total, signedTerm);
+  }, [0]);
 }
 
 function parseTransferFunction(input) {
@@ -349,6 +428,197 @@ function parseTransferFunction(input) {
   }
 
   return { numerator, denominator, error: '' };
+}
+
+function complex(real, imaginary = 0) {
+  return { real, imaginary };
+}
+
+function complexAdd(a, b) {
+  return complex(a.real + b.real, a.imaginary + b.imaginary);
+}
+
+function complexSubtract(a, b) {
+  return complex(a.real - b.real, a.imaginary - b.imaginary);
+}
+
+function complexMultiply(a, b) {
+  return complex(a.real * b.real - a.imaginary * b.imaginary, a.real * b.imaginary + a.imaginary * b.real);
+}
+
+function complexDivide(a, b) {
+  const denominator = b.real ** 2 + b.imaginary ** 2;
+  return complex(
+    (a.real * b.real + a.imaginary * b.imaginary) / denominator,
+    (a.imaginary * b.real - a.real * b.imaginary) / denominator,
+  );
+}
+
+function complexAbs(value) {
+  return Math.hypot(value.real, value.imaginary);
+}
+
+function evaluatePolynomialComplex(coefficients, value) {
+  return coefficients.reduce(
+    (result, coefficient) => complexAdd(complexMultiply(result, value), complex(coefficient, 0)),
+    complex(0, 0),
+  );
+}
+
+function cleanComplex(value) {
+  const real = Math.abs(value.real) < 1e-9 ? 0 : value.real;
+  const imaginary = Math.abs(value.imaginary) < 1e-9 ? 0 : value.imaginary;
+  return { real, imaginary };
+}
+
+function solvePolynomialRoots(coefficients) {
+  const cleanCoefficients = trimLeadingZeros(coefficients);
+  const degree = cleanCoefficients.length - 1;
+
+  if (degree <= 0) {
+    return [];
+  }
+
+  if (degree === 1) {
+    return [complex(-cleanCoefficients[1] / cleanCoefficients[0], 0)];
+  }
+
+  if (degree === 2) {
+    const [a, b, c] = cleanCoefficients;
+    const discriminant = b ** 2 - 4 * a * c;
+    if (discriminant >= 0) {
+      const root = Math.sqrt(discriminant);
+      return [complex((-b + root) / (2 * a), 0), complex((-b - root) / (2 * a), 0)];
+    }
+
+    const imaginary = Math.sqrt(-discriminant) / (2 * a);
+    return [complex(-b / (2 * a), imaginary), complex(-b / (2 * a), -imaginary)];
+  }
+
+  const leading = cleanCoefficients[0];
+  const normalized = cleanCoefficients.map((coefficient) => coefficient / leading);
+  const radius = 1 + Math.max(...normalized.slice(1).map((coefficient) => Math.abs(coefficient)));
+  let roots = Array.from({ length: degree }, (_, index) => {
+    const angle = (2 * Math.PI * index) / degree + 0.37;
+    return complex(radius * Math.cos(angle), radius * Math.sin(angle));
+  });
+
+  for (let iteration = 0; iteration < 100; iteration += 1) {
+    let maxDelta = 0;
+    roots = roots.map((root, rootIndex) => {
+      const denominator = roots.reduce((product, otherRoot, otherIndex) => {
+        if (rootIndex === otherIndex) {
+          return product;
+        }
+
+        const difference = complexSubtract(root, otherRoot);
+        return complexMultiply(product, complexAbs(difference) < 1e-12 ? complex(1e-12, 1e-12) : difference);
+      }, complex(1, 0));
+      const delta = complexDivide(evaluatePolynomialComplex(normalized, root), denominator);
+      maxDelta = Math.max(maxDelta, complexAbs(delta));
+      return complexSubtract(root, delta);
+    });
+
+    if (maxDelta < 1e-10) {
+      break;
+    }
+  }
+
+  return roots.map(cleanComplex);
+}
+
+function padPolynomial(coefficients, length) {
+  return [...Array(Math.max(0, length - coefficients.length)).fill(0), ...coefficients];
+}
+
+function addScaledPolynomials(denominator, numerator, gain) {
+  const length = Math.max(denominator.length, numerator.length);
+  const paddedDenominator = padPolynomial(denominator, length);
+  const paddedNumerator = padPolynomial(numerator, length);
+  return trimLeadingZeros(paddedDenominator.map((coefficient, index) => coefficient + gain * paddedNumerator[index]));
+}
+
+function getPolynomialScale(coefficients) {
+  return Math.max(...coefficients.map((coefficient) => Math.abs(coefficient)), 1e-9);
+}
+
+function chooseRootLocusGainRange(numerator, denominator) {
+  const ratio = getPolynomialScale(denominator) / getPolynomialScale(numerator);
+  return Math.min(Math.max(ratio * 100, 10), 1e6);
+}
+
+function sortRootsForStableStart(roots) {
+  return [...roots].sort((left, right) => left.real - right.real || left.imaginary - right.imaginary);
+}
+
+function assignRootsToBranches(previousRoots, nextRoots) {
+  const remaining = [...nextRoots];
+  return previousRoots.map((previousRoot) => {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    remaining.forEach((root, index) => {
+      const distance = Math.hypot(root.real - previousRoot.real, root.imaginary - previousRoot.imaginary);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    return remaining.splice(bestIndex, 1)[0];
+  });
+}
+
+function calculateRootLocus(input) {
+  const parsed = parseTransferFunction(input);
+  if (parsed.error) {
+    return { error: parsed.error };
+  }
+
+  if (parsed.numerator.every((value) => Math.abs(value) < 1e-12)) {
+    return { error: '鍒嗗瓙涓嶈兘涓?0' };
+  }
+
+  if (parsed.numerator.length > parsed.denominator.length) {
+    return { error: '鏍硅建杩归渶瑕佺湡鏈夌悊鎴栨鍒欑殑寮€鐜紶閫掑嚱鏁?' };
+  }
+
+  const openLoopPoles = solvePolynomialRoots(parsed.denominator);
+  const openLoopZeros = solvePolynomialRoots(parsed.numerator);
+  const sampleCount = 180;
+  const maxGain = chooseRootLocusGainRange(parsed.numerator, parsed.denominator);
+  const gains = [
+    0,
+    ...Array.from({ length: sampleCount }, (_, index) => {
+      const ratio = index / (sampleCount - 1);
+      return maxGain * ratio ** 2;
+    }).filter((gain) => gain > 0),
+  ];
+  const branches = openLoopPoles.map(() => []);
+  let previousRoots = null;
+
+  gains.forEach((gain) => {
+    const characteristic = addScaledPolynomials(parsed.denominator, parsed.numerator, gain);
+    const rawRoots = solvePolynomialRoots(characteristic);
+    const roots = previousRoots ? assignRootsToBranches(previousRoots, rawRoots) : sortRootsForStableStart(rawRoots);
+
+    roots.forEach((root, index) => {
+      if (branches[index]) {
+        branches[index].push({ gain, ...root });
+      }
+    });
+    previousRoots = roots;
+  });
+
+  const currentPoles = solvePolynomialRoots(addScaledPolynomials(parsed.denominator, parsed.numerator, 1));
+
+  return {
+    branches,
+    currentGain: 1,
+    currentPoles,
+    error: '',
+    maxGain,
+    openLoopPoles,
+    openLoopZeros,
+  };
 }
 
 function evaluatePolynomial(coefficients, omega) {
@@ -517,10 +787,10 @@ function buildSmoothPath(points, xScale, yScale) {
   }, '');
 }
 
-function buildRootLocusPath(points, branch, xScale, yScale) {
+function buildRootLocusPath(points, xScale, yScale) {
   return points.reduce((path, point, index) => {
-    const x = xScale(point[branch].real);
-    const y = yScale(point[branch].imaginary);
+    const x = xScale(point.real);
+    const y = yScale(point.imaginary);
     return index === 0 ? `M ${x} ${y}` : `${path} L ${x} ${y}`;
   }, '');
 }
@@ -713,16 +983,35 @@ function RootLocusChart({ locus }) {
     );
   }
 
+  if (locus.error) {
+    return (
+      <section className="chart-panel empty-chart" aria-label="Root Locus">
+        <AlertCircle size={28} aria-hidden="true" />
+        <p>{locus.error}</p>
+      </section>
+    );
+  }
+
   const width = 760;
   const height = 360;
   const padding = { top: 34, right: 38, bottom: 48, left: 62 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
-  const allReals = locus.points.flatMap((point) => [point.upper.real, point.lower.real]);
-  const allImaginaries = locus.points.flatMap((point) => [point.upper.imaginary, point.lower.imaginary]);
-  const realMinBase = Math.min(...allReals, locus.openLoopPole) * 1.1;
-  const realMaxBase = Math.max(0.25, Math.max(...allReals) * 0.2);
-  const imaginaryMaxBase = Math.max(0.5, Math.max(...allImaginaries.map(Math.abs)) * 1.14);
+  const allPoints = [
+    ...locus.branches.flat(),
+    ...locus.openLoopPoles,
+    ...locus.openLoopZeros,
+    ...locus.currentPoles,
+    { real: 0, imaginary: 0 },
+  ];
+  const allReals = allPoints.map((point) => point.real);
+  const allImaginaries = allPoints.map((point) => point.imaginary);
+  const realMinRaw = Math.min(...allReals);
+  const realMaxRaw = Math.max(...allReals);
+  const realPadding = Math.max((realMaxRaw - realMinRaw) * 0.12, 0.6);
+  const realMinBase = realMinRaw - realPadding;
+  const realMaxBase = realMaxRaw + realPadding;
+  const imaginaryMaxBase = Math.max(0.5, Math.max(...allImaginaries.map(Math.abs)) * 1.16);
   const realCenter = (realMinBase + realMaxBase) / 2;
   const realHalfRange = ((realMaxBase - realMinBase) / 2) / zoom;
   const imaginaryHalfRange = imaginaryMaxBase / zoom;
@@ -734,8 +1023,7 @@ function RootLocusChart({ locus }) {
   const yScale = (imaginary) =>
     padding.top + ((imaginaryMax - imaginary) / (imaginaryMax - imaginaryMin)) * plotHeight;
   const imaginaryTitleX = Math.min(Math.max(xScale(0) + 10, padding.left + 10), width - padding.right - 42);
-  const upperPath = buildRootLocusPath(locus.points, 'upper', xScale, yScale);
-  const lowerPath = buildRootLocusPath(locus.points, 'lower', xScale, yScale);
+  const branchPaths = locus.branches.map((branch) => buildRootLocusPath(branch, xScale, yScale));
   const currentPoleKey = locus.currentPoles.map((pole) => `${pole.real.toFixed(4)}:${pole.imaginary.toFixed(4)}`).join('|');
   const realTicks = [realMin, (realMin + 0) / 2, 0, realMax / 2].filter(
     (value, index, values) => value >= realMin && value <= realMax && values.indexOf(value) === index,
@@ -803,16 +1091,21 @@ function RootLocusChart({ locus }) {
 
         <line className="root-axis" x1={padding.left} x2={width - padding.right} y1={yScale(0)} y2={yScale(0)} />
         <line className="root-axis" x1={xScale(0)} x2={xScale(0)} y1={padding.top} y2={height - padding.bottom} />
-        <path className="root-locus-line" d={upperPath} />
-        <path className="root-locus-line mirror" d={lowerPath} />
+        {branchPaths.map((path, index) => (
+          <path className={`root-locus-line ${index % 2 === 1 ? 'mirror' : ''}`} d={path} key={`branch-${index}`} />
+        ))}
 
-        <g className="root-marker zero-marker" transform={`translate(${xScale(locus.openLoopZero)} ${yScale(0)})`}>
-          <circle r="7" />
-        </g>
-        <g className="root-marker pole-marker" transform={`translate(${xScale(locus.openLoopPole)} ${yScale(0)})`}>
-          <line x1="-7" x2="7" y1="-7" y2="7" />
-          <line x1="-7" x2="7" y1="7" y2="-7" />
-        </g>
+        {locus.openLoopZeros.map((zero, index) => (
+          <g className="root-marker zero-marker" key={`zero-${index}`} transform={`translate(${xScale(zero.real)} ${yScale(zero.imaginary)})`}>
+            <circle r="7" />
+          </g>
+        ))}
+        {locus.openLoopPoles.map((pole, index) => (
+          <g className="root-marker pole-marker" key={`pole-${index}`} transform={`translate(${xScale(pole.real)} ${yScale(pole.imaginary)})`}>
+            <line x1="-7" x2="7" y1="-7" y2="7" />
+            <line x1="-7" x2="7" y1="7" y2="-7" />
+          </g>
+        ))}
 
         <g className="current-poles" key={currentPoleKey}>
           {locus.currentPoles.map((pole, index) => (
@@ -834,10 +1127,10 @@ function RootLocusChart({ locus }) {
       <div className="root-locus-legend">
         <span>
           <i className="legend-line" />
-          K: 0 {'->'} {formatCompact(locus.gainAtDesign * 2.25, 2)}
+          K: 0 {'->'} {formatCompact(locus.maxGain, 2)}
         </span>
         <span>
-          <i className="legend-dot" />
+          <i className="legend-dot" /> K = {formatCompact(locus.currentGain, 2)}
           当前闭环极点
         </span>
       </div>
@@ -1060,13 +1353,7 @@ function App() {
     return calculateStepResponse(result.dampingRatio, result.naturalFrequency);
   }, [result]);
 
-  const rootLocus = useMemo(() => {
-    if (!result) {
-      return null;
-    }
-
-    return calculateRootLocus(result.dampingRatio, result.naturalFrequency);
-  }, [result]);
+  const rootLocus = useMemo(() => calculateRootLocus(transferInput), [transferInput]);
 
   const bode = useMemo(() => calculateBode(transferInput), [transferInput]);
 
