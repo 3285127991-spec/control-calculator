@@ -7,6 +7,7 @@ import { CanvasRenderer } from 'echarts/renderers';
 import {
   Activity,
   AlertCircle,
+  BookOpen,
   Calculator,
   Gauge,
   History,
@@ -28,6 +29,14 @@ echarts.use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendC
 const SETTLING_BAND = 0.02;
 const HISTORY_LIMIT = 8;
 const DEFAULT_TRANSFER_FUNCTION = '10 / (s^2 + 3s + 10)';
+const PROJECT_FEATURES = ['根轨迹', '波特图', '单位阶跃响应', '参数实时计算', '历史记录'];
+const CHANGELOG_ITEMS = [
+  { version: 'v0.1', text: '完成基础参数计算' },
+  { version: 'v0.2', text: '增加根轨迹图' },
+  { version: 'v0.3', text: '增加阶跃响应' },
+  { version: 'v0.4', text: '增加波特图' },
+  { version: 'v0.5', text: '支持手机端和 PWA/APP 化探索' },
+];
 
 function parseNumber(value) {
   if (value.trim() === '') {
@@ -981,6 +990,48 @@ function HistoryPanel({ history, onApply, onClear }) {
   );
 }
 
+function AboutPanel() {
+  return (
+    <section className="about-section" id="about" aria-labelledby="about-title">
+      <div className="section-heading about-heading">
+        <Info size={19} aria-hidden="true" />
+        <div>
+          <span>About / Guide</span>
+          <h2 id="about-title">关于项目 / 使用说明</h2>
+        </div>
+      </div>
+
+      <div className="about-layout">
+        <article className="about-copy">
+          <p>
+            这是一个由厦大本科生用 AI Codex 辅助开发的自动控制学习工具，面向自动控制原理课程中的参数估算、响应观察和图像理解练习。
+          </p>
+          <div className="feature-tags" aria-label="当前支持功能">
+            {PROJECT_FEATURES.map((feature) => (
+              <span key={feature}>{feature}</span>
+            ))}
+          </div>
+          <p>
+            项目仍在学习和迭代阶段，计算结果仅供学习参考，不能替代 MATLAB 或正式工程计算。欢迎反馈 bug 和建议，一起把这个小工具继续打磨好。
+          </p>
+        </article>
+
+        <article className="changelog-panel" aria-label="开发日志">
+          <h3>开发日志</h3>
+          <ol className="changelog-list">
+            {CHANGELOG_ITEMS.map((item) => (
+              <li key={item.version}>
+                <strong>{item.version}</strong>
+                <span>{item.text}</span>
+              </li>
+            ))}
+          </ol>
+        </article>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [mpInput, setMpInput] = useState('10');
   const [tsInput, setTsInput] = useState('2');
@@ -1076,6 +1127,10 @@ function App() {
           Control AI Lab
         </span>
         <span className="nav-status">二阶系统 · 根轨迹 · 波特图</span>
+        <a className="nav-link" href="#about">
+          <BookOpen size={16} aria-hidden="true" />
+          <span>关于项目 / 使用说明</span>
+        </a>
       </nav>
 
       <section className="hero">
@@ -1132,6 +1187,8 @@ function App() {
       <RootLocusChart locus={rootLocus} />
 
       <HistoryPanel history={history} onApply={applyHistory} onClear={() => setHistory([])} />
+
+      <AboutPanel />
 
       <section className="formula-section">
         <div className="section-heading">

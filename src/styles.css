@@ -43,6 +43,7 @@
 html {
   min-width: 320px;
   min-height: 100%;
+  scroll-behavior: smooth;
   background:
     radial-gradient(circle at 18% 12%, rgba(99, 102, 241, 0.34), transparent 30rem),
     radial-gradient(circle at 86% 8%, rgba(20, 184, 166, 0.28), transparent 28rem),
@@ -119,7 +120,7 @@ p {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  width: min(720px, 100%);
+  width: min(900px, 100%);
   margin: 0 auto;
   padding: 12px 16px;
   border: 1px solid var(--line);
@@ -132,7 +133,8 @@ p {
 
 .brand,
 .nav-status,
-.eyebrow {
+.eyebrow,
+.nav-link {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -148,6 +150,30 @@ p {
   color: var(--muted);
   font-size: 0.88rem;
   font-weight: 650;
+}
+
+.nav-link {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--surface-soft);
+  font-size: 0.86rem;
+  font-weight: 800;
+  text-decoration: none;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    background 180ms ease;
+}
+
+.nav-link:hover {
+  transform: translateY(-1px);
+  border-color: rgba(22, 119, 255, 0.32);
+  color: var(--accent);
+  background: var(--surface-strong);
 }
 
 .hero {
@@ -975,12 +1001,35 @@ textarea::placeholder {
   min-width: 0;
 }
 
+.about-section {
+  width: min(960px, 100%);
+  margin: 34px auto 0;
+  min-width: 0;
+  scroll-margin-top: 96px;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
   color: var(--text);
+}
+
+.about-heading {
+  justify-content: flex-start;
+}
+
+.about-heading span {
+  color: var(--soft);
+  font-size: 0.78rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.about-heading h2 {
+  margin-top: 4px;
 }
 
 h2 {
@@ -994,9 +1043,87 @@ h2 {
   margin-top: 18px;
 }
 
+.about-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
 .formula-grid article {
   padding: 22px;
   min-width: 0;
+}
+
+.about-copy,
+.changelog-panel {
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
+}
+
+.about-copy {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+}
+
+.about-copy p {
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.feature-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.feature-tags span {
+  padding: 8px 11px;
+  border: 1px solid rgba(22, 119, 255, 0.18);
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(22, 119, 255, 0.08);
+  font-size: 0.9rem;
+  font-weight: 820;
+}
+
+.changelog-list {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.changelog-list li {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.changelog-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.changelog-list strong {
+  color: var(--accent);
+  font-weight: 900;
+}
+
+.changelog-list span {
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 h3 {
@@ -1102,7 +1229,8 @@ code {
   }
 
   .calculator-panel,
-  .formula-grid {
+  .formula-grid,
+  .about-layout {
     grid-template-columns: 1fr;
   }
 
@@ -1132,6 +1260,11 @@ code {
   .history-list {
     grid-template-columns: 1fr;
   }
+
+  .about-heading {
+    justify-content: center;
+    text-align: center;
+  }
 }
 
 @media (max-width: 520px) {
@@ -1141,11 +1274,28 @@ code {
 
   .glass-nav {
     align-items: center;
+    gap: 8px;
     border-radius: 8px;
   }
 
   .nav-status {
     display: none;
+  }
+
+  .brand {
+    font-size: 0.9rem;
+  }
+
+  .nav-link {
+    max-width: 154px;
+    padding: 8px 10px;
+    font-size: 0.8rem;
+  }
+
+  .nav-link span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .hero {
@@ -1225,8 +1375,24 @@ code {
   }
 
   .history-panel,
-  .formula-grid article {
+  .formula-grid article,
+  .about-copy,
+  .changelog-panel {
     padding: 18px;
+  }
+
+  .feature-tags {
+    gap: 8px;
+  }
+
+  .feature-tags span {
+    padding: 7px 10px;
+    font-size: 0.84rem;
+  }
+
+  .changelog-list li {
+    grid-template-columns: 56px 1fr;
+    gap: 10px;
   }
 
   .response-chart {
